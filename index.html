@@ -53,6 +53,7 @@ input[type=color]{background:var(--field);border:1px solid var(--line);border-ra
 #prog:empty{display:none}
 #prog{flex-basis:100%}
 .preset{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line)}
+.dl{display:inline-block;padding:10px 14px;border-radius:10px;background:var(--accent);color:var(--accent-ink);text-decoration:none;font-size:14px}
 </style>
 </head>
 <body>
@@ -91,7 +92,10 @@ input[type=color]{background:var(--field);border:1px solid var(--line);border-ra
       <div class="row"><label>总时长（秒）<input type="number" id="iDur" value="5" min="3" max="20" step="0.5"></label><label>帧率<select id="iFps"><option>30</option><option>60</option></select></label><label>预览背景<select id="iBg"><option value="checker">棋盘（透明）</option><option value="white">白色</option><option value="dark">深色</option><option value="color">彩色</option><option value="custom">我的图片</option></select></label></div>
       <div class="row"><span class="file">上传预览背景图（例如视频截图）<input type="file" id="iBgFile" accept="image/*"></span></div>
       <div class="row"><label style="display:flex;flex-direction:row;gap:8px;align-items:center"><input type="checkbox" id="iStamp"> 文件名加上日期时间（重复导出同一个用户名时建议勾选，避免 Premiere 沿用旧素材）</label></div>
-      <div class="row"><button class="primary" id="export">下载透明动画（PNG 序列 .zip）</button></div>
+      <div class="row"><button class="primary" id="exportMov">下载透明视频（.mov）</button><button id="export">下载 PNG 序列（.zip，备用）</button></div>
+      <p class="hint">.mov 是单一的视频文件，背景透明，可以直接拖进 Premiere 使用，不用解压、也不用勾选 Image Sequence。如果你的剪辑软件打不开 .mov，或透明背景不对，请改用下面的 PNG 序列 .zip。</p>
+      <div class="row" id="dlbox"></div>
+      <p class="hint">用手机导出的小提醒：导出时请保持屏幕亮着，先不要切换到别的 App；建议帧率选 30、总时长在 6 秒内。如果没有自动下载，请点导出完成后出现的“点这里保存”。</p>
       <p class="hint">输出尺寸 2160×720。在 Premiere 里导入第一张图时，记得勾选 Image Sequence，再到“解释素材”设成对应帧率。</p>
     </div>
     <div class="tabpane" id="t5">
@@ -632,8 +636,43 @@ function makeZip(files) {
   return new Blob([...parts, ...cen, e.buffer], { type: 'application/zip' });
 }
 
-$('export').addEventListener('click', async () => {
-  const btn = $('export'); btn.disabled = true; exporting = true;
+function makeMov(frames, w, h, fps) {
+  const N = frames.length;
+  const u32 = n => new Uint8Array([(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]);
+  const u16 = n => new Uint8Array([(n >> 8) & 255, n & 255]);
+  const u8 = n => new Uint8Array([n & 255]);
+  const str = s => Uint8Array.from(s, c => c.charCodeAt(0));
+  const zeros = n => new Uint8Array(n);
+  const cat = (...a) => { const o = new Uint8Array(a.reduce((x, y) => x + y.length, 0)); let p = 0; a.forEach(b => { o.set(b, p); p += b.length; }); return o; };
+  const atom = (t, ...c) => { const body = cat(...c); return cat(u32(8 + body.length), str(t), body); };
+  const pascal = (s, len) => { const o = zeros(len); o[0] = s.length; o.set(str(s), 1); return o; };
+  const matrix = cat(u32(0x00010000), u32(0), u32(0), u32(0), u32(0x00010000), u32(0), u32(0), u32(0), u32(0x40000000));
+  const build = off => atom('moov',
+    atom('mvhd', u32(0), u32(0), u32(0), u32(fps), u32(N), u32(0x00010000), u16(0x0100), zeros(10), matrix, zeros(24), u32(2)),
+    atom('trak',
+      atom('tkhd', u32(0x0000000F), u32(0), u32(0), u32(1), u32(0), u32(N), zeros(8), u16(0), u16(0), u16(0), u16(0), matrix, u32(w * 65536), u32(h * 65536)),
+      atom('mdia',
+        atom('mdhd', u32(0), u32(0), u32(0), u32(fps), u32(N), u16(0x55C4), u16(0)),
+        atom('hdlr', u32(0), str('mhlr'), str('vide'), u32(0), u32(0), u32(0), pascal('VideoHandler', 13)),
+        atom('minf',
+          atom('vmhd', u32(1), u16(0), zeros(6)),
+          atom('hdlr', u32(0), str('dhlr'), str('alis'), u32(0), u32(0), u32(0), pascal('DataHandler', 12)),
+          atom('dinf', atom('dref', u32(0), u32(1), atom('alis', u32(1)))),
+          atom('stbl',
+            atom('stsd', u32(0), u32(1), atom('png ', zeros(6), u16(1), u16(0), u16(0), u32(0), u32(0), u32(0), u16(w), u16(h), u32(0x00480000), u32(0x00480000), u32(0), u16(1), pascal('PNG', 32), u16(32), u16(0xFFFF))),
+            atom('stts', u32(0), u32(1), u32(N), u32(1)),
+            atom('stsc', u32(0), u32(1), u32(1), u32(N), u32(1)),
+            atom('stsz', u32(0), u32(0), u32(N), ...frames.map(f => u32(f.length))),
+            atom('stco', u32(0), u32(1), u32(off)))))));
+  const ftyp = atom('ftyp', str('qt  '), u32(0x20050300), str('qt  '));
+  const moovSize = build(0).length;
+  const moov = build(ftyp.length + moovSize + 8);
+  const mdatSize = 8 + frames.reduce((x, f) => x + f.length, 0);
+  return new Blob([ftyp, moov, u32(mdatSize), str('mdat'), ...frames], { type: 'video/quicktime' });
+}
+
+async function doExport(kind) {
+  const btns = [$('export'), $('exportMov')]; btns.forEach(x => x.disabled = true); exporting = true;
   try {
     const n = Math.round(st.total * st.fps), files = [];
     const d = new Date(), z = x => String(x).padStart(2, '0');
@@ -646,15 +685,23 @@ $('export').addEventListener('click', async () => {
       files.push({ name: `${base}_${String(i + 1).padStart(4, '0')}.png`, data: new Uint8Array(await blob.arrayBuffer()) });
       $('prog').textContent = `正在导出 ${i + 1} / ${n} 帧…`;
     }
+    const ext = kind === 'mov' ? 'mov' : 'zip', fname = `${base}.${ext}`;
+    const out = kind === 'mov' ? makeMov(files.map(f => f.data), cv.width, cv.height, st.fps) : makeZip(files);
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(makeZip(files)); a.download = `${base}.zip`;
+    const zurl = URL.createObjectURL(out); a.href = zurl; a.download = fname;
     document.body.appendChild(a); a.click(); a.remove();
-    $('prog').textContent = `完成：${n} 帧，已下载 ${base}.zip（${cv.width}×${cv.height}）`;
+    const box = $('dlbox'); box.textContent = '';
+    const link = document.createElement('a'); link.className = 'dl'; link.href = zurl; link.download = fname; link.textContent = `点这里保存 ${fname}`;
+    box.appendChild(link);
+    $('prog').textContent = `完成：${n} 帧，已下载 ${fname}（${cv.width}×${cv.height}）`;
   } catch (err) {
     $('prog').textContent = '导出失败：' + err.message;
   }
-  exporting = false; btn.disabled = false; t0 = performance.now();
-});
+  exporting = false; btns.forEach(x => x.disabled = false); t0 = performance.now();
+}
+$('export').addEventListener('click', () => doExport('zip'));
+$('exportMov').addEventListener('click', () => doExport('mov'));
+
 
 function chipify(id) {
   const sel = $(id); sel.style.display = 'none';
